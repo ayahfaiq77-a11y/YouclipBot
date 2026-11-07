@@ -14,8 +14,8 @@ android {
         minSdk = 26
         targetSdk = 35
 
-        versionCode = 2
-        versionName = "2.1"
+        versionCode = 3
+        versionName = "2.3"
     }
 
     compileOptions {
@@ -34,20 +34,25 @@ android {
 
 dependencies {
 
+    // Jetpack Compose BOM
     val composeBom =
-        platform("androidx.compose:compose-bom:2024.12.01")
+        platform(
+            "androidx.compose:compose-bom:2024.12.01"
+        )
 
     implementation(composeBom)
 
-    // Jetpack Compose
+    // Android Activity + Compose
     implementation(
         "androidx.activity:activity-compose:1.10.0"
     )
 
+    // Material Design 3
     implementation(
         "androidx.compose.material3:material3"
     )
 
+    // Compose UI
     implementation(
         "androidx.compose.ui:ui"
     )
@@ -61,11 +66,27 @@ dependencies {
         "com.google.mlkit:face-detection:16.1.7"
     )
 
-    // Supaya ML Kit Task bisa memakai .await()
+    // Coroutine support untuk ML Kit Task.await()
     implementation(
         "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.1"
     )
 
+    // Media3 Common
+    implementation(
+        "androidx.media3:media3-common:1.11.1"
+    )
+
+    // Media3 Video Effects
+    implementation(
+        "androidx.media3:media3-effect:1.11.1"
+    )
+
+    // Media3 Transformer
+    implementation(
+        "androidx.media3:media3-transformer:1.11.1"
+    )
+
+    // Compose debug tooling
     debugImplementation(
         "androidx.compose.ui:ui-tooling"
     )
