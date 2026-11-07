@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.youclipbot.android"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.youclipbot.android"
