@@ -6,7 +6,8 @@ plugins {
 
 android {
     namespace = "com.youclipbot.android"
-    compileSdk = 35
+
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.youclipbot.android"
@@ -42,17 +43,15 @@ dependencies {
 
     implementation(composeBom)
 
-    // Android Activity + Compose
+    // Jetpack Compose
     implementation(
         "androidx.activity:activity-compose:1.10.0"
     )
 
-    // Material Design 3
     implementation(
         "androidx.compose.material3:material3"
     )
 
-    // Compose UI
     implementation(
         "androidx.compose.ui:ui"
     )
@@ -71,22 +70,22 @@ dependencies {
         "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.1"
     )
 
-    // Media3 Common
+    // Media3
+    val media3Version = "1.11.1"
+
     implementation(
-        "androidx.media3:media3-common:1.11.1"
+        "androidx.media3:media3-common:$media3Version"
     )
 
-    // Media3 Video Effects
     implementation(
-        "androidx.media3:media3-effect:1.11.1"
+        "androidx.media3:media3-effect:$media3Version"
     )
 
-    // Media3 Transformer
     implementation(
-        "androidx.media3:media3-transformer:1.11.1"
+        "androidx.media3:media3-transformer:$media3Version"
     )
 
-    // Compose debug tooling
+    // Compose debug tools
     debugImplementation(
         "androidx.compose.ui:ui-tooling"
     )
