@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
@@ -41,6 +42,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlin.math.abs
 import kotlin.math.max
 
 class MainActivity : ComponentActivity() {
@@ -66,12 +68,18 @@ data class VideoInfo(
 data class ClipCandidate(
     val startMs: Long,
     val endMs: Long,
-    val score: Int,
-    val facePresence: Int
+    val visualScore: Int,
+    val hookScore: Int,
+    val durationScore: Int,
+    val viralScore: Int,
+    val facePresence: Int,
+    val reasons: List<String>
 )
 
 @Composable
-fun YouClipBotApp(context: Context) {
+fun YouClipBotApp(
+    context: Context
+) {
 
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
@@ -100,7 +108,8 @@ fun YouClipBotApp(context: Context) {
 
     val videoPicker =
         rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.OpenDocument()
+            contract =
+                ActivityResultContracts.OpenDocument()
         ) { uri ->
 
             if (uri != null) {
@@ -108,15 +117,19 @@ fun YouClipBotApp(context: Context) {
                 try {
 
                     try {
+
                         context.contentResolver
                             .takePersistableUriPermission(
                                 uri,
                                 Intent.FLAG_GRANT_READ_URI_PERMISSION
                             )
+
                     } catch (_: SecurityException) {
-                        // Beberapa file picker tidak memberikan
-                        // persistable permission.
-                        // File masih dapat digunakan selama izin aktif.
+
+                        /*
+                         * Beberapa file picker tidak memberi
+                         * persistable permission.
+                         */
                     }
 
                     videoInfo =
@@ -158,20 +171,31 @@ fun YouClipBotApp(context: Context) {
         ) {
 
             Text(
-                text = "YouClipBot v2.1",
+                text =
+                    "YouClipBot v2.2",
+
                 style =
-                    MaterialTheme.typography.headlineMedium
+                    MaterialTheme.typography
+                        .headlineMedium
             )
 
             Text(
                 text =
-                    "Pilih video panjang, lalu YouClipBot " +
-                    "akan mencari maksimal 5 kandidat klip " +
-                    "berdasarkan keberadaan dan ukuran wajah."
+                    "Pilih video panjang. YouClipBot akan " +
+                    "menganalisis wajah, komposisi visual, " +
+                    "perubahan visual pembuka, dan durasi " +
+                    "untuk mencari maksimal 5 kandidat klip."
+            )
+
+            Text(
+                text =
+                    "Estimated Viral Score adalah estimasi " +
+                    "visual, bukan jaminan video akan viral."
             )
 
             Button(
-                modifier = Modifier.fillMaxWidth(),
+                modifier =
+                    Modifier.fillMaxWidth(),
 
                 enabled = !analyzing,
 
@@ -184,10 +208,12 @@ fun YouClipBotApp(context: Context) {
             ) {
 
                 Text(
-                    if (videoInfo == null)
-                        "Pilih Video"
-                    else
-                        "Ganti Video"
+                    text =
+                        if (videoInfo == null) {
+                            "Pilih Video"
+                        } else {
+                            "Ganti Video"
+                        }
                 )
             }
 
@@ -197,12 +223,15 @@ fun YouClipBotApp(context: Context) {
 
                 Text(
                     text = "Video terpilih",
+
                     style =
-                        MaterialTheme.typography.titleMedium
+                        MaterialTheme.typography
+                            .titleMedium
                 )
 
                 Text(
-                    text = "Nama: ${video.name}"
+                    text =
+                        "Nama: ${video.name}"
                 )
 
                 Text(
@@ -222,7 +251,8 @@ fun YouClipBotApp(context: Context) {
                 )
 
                 Button(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier =
+                        Modifier.fillMaxWidth(),
 
                     enabled = !analyzing,
 
@@ -231,9 +261,11 @@ fun YouClipBotApp(context: Context) {
                         scope.launch {
 
                             analyzing = true
-                            errorMessage = null
+
                             clipCandidates =
                                 emptyList()
+
+                            errorMessage = null
 
                             analysisStatus =
                                 "Menyiapkan analisis video..."
@@ -260,11 +292,14 @@ fun YouClipBotApp(context: Context) {
                                     if (
                                         results.isNotEmpty()
                                     ) {
+
                                         "Analisis selesai. " +
                                         "${results.size} kandidat ditemukan."
+
                                     } else {
+
                                         "Analisis selesai, tetapi " +
-                                        "tidak ditemukan kandidat yang sesuai."
+                                        "tidak ditemukan kandidat."
                                     }
 
                             } catch (
@@ -289,10 +324,12 @@ fun YouClipBotApp(context: Context) {
                 ) {
 
                     Text(
-                        if (analyzing)
-                            "Sedang Menganalisis..."
-                        else
-                            "Analisis Video"
+                        text =
+                            if (analyzing) {
+                                "Sedang Menganalisis..."
+                            } else {
+                                "Analisis Potensi Viral"
+                            }
                     )
                 }
             }
@@ -305,7 +342,9 @@ fun YouClipBotApp(context: Context) {
                 )
             }
 
-            if (analysisStatus.isNotBlank()) {
+            if (
+                analysisStatus.isNotBlank()
+            ) {
 
                 Text(
                     text = analysisStatus
@@ -316,74 +355,136 @@ fun YouClipBotApp(context: Context) {
 
                 Text(
                     text = message,
+
                     color =
-                        MaterialTheme.colorScheme.error
+                        MaterialTheme.colorScheme
+                            .error
                 )
             }
 
-            if (clipCandidates.isNotEmpty()) {
+            if (
+                clipCandidates.isNotEmpty()
+            ) {
 
                 HorizontalDivider()
 
                 Text(
                     text =
-                        "Top ${clipCandidates.size} Clips",
+                        "Top ${clipCandidates.size} Kandidat",
 
                     style =
-                        MaterialTheme.typography.titleMedium
+                        MaterialTheme.typography
+                            .titleMedium
                 )
 
                 clipCandidates.forEachIndexed {
                     index,
                     clip ->
 
-                    Card(
-                        modifier =
-                            Modifier.fillMaxWidth()
-                    ) {
+                    ClipCandidateCard(
+                        position = index + 1,
+                        clip = clip
+                    )
+                }
+            }
+        }
+    }
+}
 
-                        Column(
-                            modifier =
-                                Modifier.padding(16.dp),
+@Composable
+fun ClipCandidateCard(
+    position: Int,
+    clip: ClipCandidate
+) {
 
-                            verticalArrangement =
-                                Arrangement.spacedBy(6.dp)
-                        ) {
+    Card(
+        modifier =
+            Modifier.fillMaxWidth()
+    ) {
 
-                            Text(
-                                text =
-                                    "#${index + 1} • " +
-                                    "Score ${clip.score}",
+        Column(
+            modifier =
+                Modifier.padding(16.dp),
 
-                                style =
-                                    MaterialTheme
-                                        .typography
-                                        .titleMedium
-                            )
+            verticalArrangement =
+                Arrangement.spacedBy(7.dp)
+        ) {
 
-                            Text(
-                                text =
-                                    "${formatDuration(clip.startMs)}" +
-                                    " - " +
-                                    formatDuration(clip.endMs)
-                            )
+            Text(
+                text =
+                    "#$position • Estimated Viral Score " +
+                    "${clip.viralScore}/100",
 
-                            Text(
-                                text =
-                                    "Durasi klip: " +
-                                    formatDuration(
-                                        clip.endMs -
-                                        clip.startMs
-                                    )
-                            )
+                style =
+                    MaterialTheme.typography
+                        .titleMedium
+            )
 
-                            Text(
-                                text =
-                                    "Wajah terdeteksi: " +
-                                    "${clip.facePresence}%"
-                            )
-                        }
-                    }
+            Text(
+                text =
+                    viralLabel(
+                        clip.viralScore
+                    )
+            )
+
+            Text(
+                text =
+                    "${formatDuration(clip.startMs)}" +
+                    " - " +
+                    formatDuration(clip.endMs)
+            )
+
+            Text(
+                text =
+                    "Durasi klip: " +
+                    formatDuration(
+                        clip.endMs -
+                        clip.startMs
+                    )
+            )
+
+            HorizontalDivider()
+
+            Text(
+                text =
+                    "Visual Score: " +
+                    "${clip.visualScore}/100"
+            )
+
+            Text(
+                text =
+                    "Opening Hook Visual: " +
+                    "${clip.hookScore}/100"
+            )
+
+            Text(
+                text =
+                    "Duration Score: " +
+                    "${clip.durationScore}/100"
+            )
+
+            Text(
+                text =
+                    "Wajah terdeteksi: " +
+                    "${clip.facePresence}%"
+            )
+
+            if (
+                clip.reasons.isNotEmpty()
+            ) {
+
+                HorizontalDivider()
+
+                Text(
+                    text = "Alasan penilaian:"
+                )
+
+                clip.reasons.forEach {
+                    reason ->
+
+                    Text(
+                        text = "• $reason"
+                    )
                 }
             }
         }
@@ -455,10 +556,12 @@ fun getVideoInfo(
         VideoInfo(
             uri = uri,
             name = name,
+
             sizeMb =
                 size.toDouble() /
                 1024.0 /
                 1024.0,
+
             durationMs = duration
         )
 
@@ -476,6 +579,7 @@ suspend fun analyzeVideo(
     withContext(Dispatchers.IO) {
 
         if (video.durationMs <= 0L) {
+
             throw IllegalArgumentException(
                 "Durasi video tidak dapat dibaca."
             )
@@ -484,18 +588,15 @@ suspend fun analyzeVideo(
         val retriever =
             MediaMetadataRetriever()
 
-        val detectorOptions =
-            FaceDetectorOptions.Builder()
-                .setPerformanceMode(
-                    FaceDetectorOptions
-                        .PERFORMANCE_MODE_FAST
-                )
-                .enableTracking()
-                .build()
-
         val detector =
             FaceDetection.getClient(
-                detectorOptions
+                FaceDetectorOptions.Builder()
+                    .setPerformanceMode(
+                        FaceDetectorOptions
+                            .PERFORMANCE_MODE_FAST
+                    )
+                    .enableTracking()
+                    .build()
             )
 
         try {
@@ -521,6 +622,7 @@ suspend fun analyzeVideo(
                 clipLength <
                 minimumClipLength
             ) {
+
                 throw IllegalArgumentException(
                     "Video terlalu pendek. " +
                     "Gunakan video minimal 10 detik."
@@ -528,10 +630,8 @@ suspend fun analyzeVideo(
             }
 
             /*
-             * Untuk video panjang, step dibuat lebih besar
-             * agar jumlah kandidat tidak berlebihan.
-             *
-             * Maksimal kurang lebih 120 kandidat.
+             * Maksimal sekitar 120 kandidat.
+             * Ini mengurangi beban pada POCO X3.
              */
             val candidateStep =
                 max(
@@ -575,206 +675,21 @@ suspend fun analyzeVideo(
                     )
                 }
 
-                var validSamples = 0
-                var faceSamples = 0
-                var faceAreaTotal = 0.0
-                var centerScoreTotal = 0.0
-
-                val sampleCount = 5
-
-                for (
-                    sampleIndex
-                    in 0 until sampleCount
-                ) {
-
-                    val samplePositionMs =
-                        startMs +
-                        (
-                            (endMs - startMs) *
-                            (sampleIndex + 1) /
-                            (sampleCount + 1)
-                        )
-
-                    val bitmap: Bitmap? =
-                        retriever.getFrameAtTime(
-                            samplePositionMs * 1000L,
-
-                            MediaMetadataRetriever
-                                .OPTION_CLOSEST_SYNC
-                        )
-
-                    if (bitmap != null) {
-
-                        validSamples++
-
-                        try {
-
-                            val inputImage =
-                                InputImage.fromBitmap(
-                                    bitmap,
-                                    0
-                                )
-
-                            val faces =
-                                detector
-                                    .process(inputImage)
-                                    .await()
-
-                            val primaryFace =
-                                faces.maxByOrNull {
-                                    face ->
-
-                                    face.boundingBox
-                                        .width() *
-                                    face.boundingBox
-                                        .height()
-                                }
-
-                            if (primaryFace != null) {
-
-                                faceSamples++
-
-                                val frameArea =
-                                    bitmap.width
-                                        .toDouble() *
-                                    bitmap.height
-                                        .toDouble()
-
-                                val faceArea =
-                                    primaryFace
-                                        .boundingBox
-                                        .width()
-                                        .toDouble() *
-                                    primaryFace
-                                        .boundingBox
-                                        .height()
-                                        .toDouble()
-
-                                if (frameArea > 0.0) {
-
-                                    faceAreaTotal +=
-                                        faceArea /
-                                        frameArea
-                                }
-
-                                val faceCenterX =
-                                    primaryFace
-                                        .boundingBox
-                                        .centerX()
-                                        .toDouble()
-
-                                val frameCenterX =
-                                    bitmap.width /
-                                    2.0
-
-                                val distanceFromCenter =
-                                    kotlin.math.abs(
-                                        faceCenterX -
-                                        frameCenterX
-                                    )
-
-                                val maximumDistance =
-                                    frameCenterX
-                                        .coerceAtLeast(1.0)
-
-                                val centerScore =
-                                    (
-                                        1.0 -
-                                        (
-                                            distanceFromCenter /
-                                            maximumDistance
-                                        )
-                                    ).coerceIn(
-                                        0.0,
-                                        1.0
-                                    )
-
-                                centerScoreTotal +=
-                                    centerScore
-                            }
-
-                        } finally {
-
-                            bitmap.recycle()
-                        }
-                    }
-                }
-
-                if (validSamples > 0) {
-
-                    val facePresence =
-                        faceSamples.toDouble() /
-                        validSamples.toDouble()
-
-                    val averageFaceArea =
-                        if (faceSamples > 0) {
-
-                            faceAreaTotal /
-                            faceSamples.toDouble()
-
-                        } else {
-
-                            0.0
-                        }
-
-                    val averageCenterScore =
-                        if (faceSamples > 0) {
-
-                            centerScoreTotal /
-                            faceSamples.toDouble()
-
-                        } else {
-
-                            0.0
-                        }
-
-                    /*
-                     * Skor v2.1:
-                     * 60% konsistensi wajah
-                     * 25% ukuran wajah
-                     * 15% posisi wajah dekat tengah
-                     */
-                    val score =
-                        (
-                            facePresence * 60.0 +
-
-                            (
-                                averageFaceArea
-                                    .coerceAtMost(
-                                        0.25
-                                    ) /
-                                0.25
-                            ) * 25.0 +
-
-                            averageCenterScore *
-                            15.0
-                        )
-                            .toInt()
-                            .coerceIn(
-                                0,
-                                100
-                            )
-
-                    candidates.add(
-                        ClipCandidate(
-                            startMs = startMs,
-                            endMs = endMs,
-                            score = score,
-                            facePresence =
-                                (
-                                    facePresence *
-                                    100.0
-                                )
-                                    .toInt()
-                                    .coerceIn(
-                                        0,
-                                        100
-                                    )
-                        )
+                val result =
+                    analyzeClipCandidate(
+                        retriever = retriever,
+                        detector = detector,
+                        startMs = startMs,
+                        endMs = endMs
                     )
+
+                if (result != null) {
+
+                    candidates.add(result)
                 }
 
-                startMs += candidateStep
+                startMs +=
+                    candidateStep
             }
 
             selectTopClips(
@@ -789,6 +704,594 @@ suspend fun analyzeVideo(
         }
     }
 
+suspend fun analyzeClipCandidate(
+    retriever: MediaMetadataRetriever,
+
+    detector:
+        com.google.mlkit.vision.face.FaceDetector,
+
+    startMs: Long,
+    endMs: Long
+): ClipCandidate? {
+
+    var validSamples = 0
+    var faceSamples = 0
+
+    var faceAreaTotal = 0.0
+    var centerScoreTotal = 0.0
+
+    var firstBrightness: Double? = null
+    var secondBrightness: Double? = null
+
+    val sampleCount = 6
+
+    for (
+        sampleIndex
+        in 0 until sampleCount
+    ) {
+
+        val samplePositionMs =
+            startMs +
+            (
+                (endMs - startMs) *
+                (sampleIndex + 1) /
+                (sampleCount + 1)
+            )
+
+        val bitmap: Bitmap? =
+            retriever.getFrameAtTime(
+                samplePositionMs * 1000L,
+
+                MediaMetadataRetriever
+                    .OPTION_CLOSEST_SYNC
+            )
+
+        if (bitmap != null) {
+
+            validSamples++
+
+            try {
+
+                if (sampleIndex == 0) {
+
+                    firstBrightness =
+                        calculateFrameBrightness(
+                            bitmap
+                        )
+
+                } else if (
+                    sampleIndex == 1
+                ) {
+
+                    secondBrightness =
+                        calculateFrameBrightness(
+                            bitmap
+                        )
+                }
+
+                val inputImage =
+                    InputImage.fromBitmap(
+                        bitmap,
+                        0
+                    )
+
+                val faces =
+                    detector
+                        .process(inputImage)
+                        .await()
+
+                val primaryFace =
+                    faces.maxByOrNull {
+                        face ->
+
+                        face.boundingBox
+                            .width() *
+
+                        face.boundingBox
+                            .height()
+                    }
+
+                if (primaryFace != null) {
+
+                    faceSamples++
+
+                    val frameArea =
+                        bitmap.width.toDouble() *
+                        bitmap.height.toDouble()
+
+                    val faceArea =
+                        primaryFace.boundingBox
+                            .width()
+                            .toDouble() *
+
+                        primaryFace.boundingBox
+                            .height()
+                            .toDouble()
+
+                    if (frameArea > 0.0) {
+
+                        faceAreaTotal +=
+                            faceArea /
+                            frameArea
+                    }
+
+                    val faceCenterX =
+                        primaryFace.boundingBox
+                            .centerX()
+                            .toDouble()
+
+                    val frameCenterX =
+                        bitmap.width /
+                        2.0
+
+                    val distanceFromCenter =
+                        abs(
+                            faceCenterX -
+                            frameCenterX
+                        )
+
+                    val maximumDistance =
+                        frameCenterX
+                            .coerceAtLeast(1.0)
+
+                    val centerScore =
+                        (
+                            1.0 -
+                            (
+                                distanceFromCenter /
+                                maximumDistance
+                            )
+                        ).coerceIn(
+                            0.0,
+                            1.0
+                        )
+
+                    centerScoreTotal +=
+                        centerScore
+                }
+
+            } finally {
+
+                bitmap.recycle()
+            }
+        }
+    }
+
+    if (validSamples <= 0) {
+
+        return null
+    }
+
+    val facePresence =
+        faceSamples.toDouble() /
+        validSamples.toDouble()
+
+    val averageFaceArea =
+        if (faceSamples > 0) {
+
+            faceAreaTotal /
+            faceSamples.toDouble()
+
+        } else {
+
+            0.0
+        }
+
+    val averageCenterScore =
+        if (faceSamples > 0) {
+
+            centerScoreTotal /
+            faceSamples.toDouble()
+
+        } else {
+
+            0.0
+        }
+
+    val openingVisualChange =
+        if (
+            firstBrightness != null &&
+            secondBrightness != null
+        ) {
+
+            (
+                abs(
+                    firstBrightness -
+                    secondBrightness
+                ) / 0.35
+            ).coerceIn(
+                0.0,
+                1.0
+            )
+
+        } else {
+
+            0.0
+        }
+
+    val durationMs =
+        endMs - startMs
+
+    val visualScore =
+        calculateVisualScore(
+            facePresence =
+                facePresence,
+
+            averageFaceArea =
+                averageFaceArea,
+
+            averageCenterScore =
+                averageCenterScore
+        )
+
+    val hookScore =
+        (
+            openingVisualChange *
+            100.0
+        )
+            .toInt()
+            .coerceIn(
+                0,
+                100
+            )
+
+    val durationScore =
+        calculateDurationScore(
+            durationMs
+        )
+
+    val viralResult =
+        calculateEstimatedViralScore(
+            facePresence =
+                facePresence,
+
+            averageFaceArea =
+                averageFaceArea,
+
+            averageCenterScore =
+                averageCenterScore,
+
+            openingVisualChange =
+                openingVisualChange,
+
+            clipDurationMs =
+                durationMs
+        )
+
+    return ClipCandidate(
+        startMs = startMs,
+        endMs = endMs,
+
+        visualScore =
+            visualScore,
+
+        hookScore =
+            hookScore,
+
+        durationScore =
+            durationScore,
+
+        viralScore =
+            viralResult.first,
+
+        facePresence =
+            (
+                facePresence *
+                100.0
+            )
+                .toInt()
+                .coerceIn(
+                    0,
+                    100
+                ),
+
+        reasons =
+            viralResult.second
+    )
+}
+
+fun calculateVisualScore(
+    facePresence: Double,
+    averageFaceArea: Double,
+    averageCenterScore: Double
+): Int {
+
+    val presenceScore =
+        facePresence
+            .coerceIn(
+                0.0,
+                1.0
+            ) *
+        50.0
+
+    val faceSizeScore =
+        (
+            averageFaceArea
+                .coerceAtMost(0.25) /
+            0.25
+        ) *
+        30.0
+
+    val centerScore =
+        averageCenterScore
+            .coerceIn(
+                0.0,
+                1.0
+            ) *
+        20.0
+
+    return (
+        presenceScore +
+        faceSizeScore +
+        centerScore
+    )
+        .toInt()
+        .coerceIn(
+            0,
+            100
+        )
+}
+
+fun calculateDurationScore(
+    durationMs: Long
+): Int {
+
+    val durationSeconds =
+        durationMs /
+        1000L
+
+    return when (
+        durationSeconds
+    ) {
+
+        in 20L..35L ->
+            100
+
+        in 15L..45L ->
+            75
+
+        in 10L..60L ->
+            50
+
+        else ->
+            25
+    }
+}
+
+fun calculateEstimatedViralScore(
+    facePresence: Double,
+    averageFaceArea: Double,
+    averageCenterScore: Double,
+    openingVisualChange: Double,
+    clipDurationMs: Long
+): Pair<Int, List<String>> {
+
+    val reasons =
+        mutableListOf<String>()
+
+    /*
+     * Bobot Estimated Viral Score:
+     *
+     * 30% konsistensi wajah
+     * 15% ukuran wajah
+     * 15% posisi wajah
+     * 25% perubahan visual pembuka
+     * 15% durasi
+     */
+
+    val facePresenceScore =
+        facePresence
+            .coerceIn(
+                0.0,
+                1.0
+            ) *
+        30.0
+
+    if (facePresence >= 0.80) {
+
+        reasons.add(
+            "Wajah terlihat konsisten"
+        )
+    }
+
+    val faceSizeScore =
+        (
+            averageFaceArea
+                .coerceAtMost(0.25) /
+            0.25
+        ) *
+        15.0
+
+    if (averageFaceArea >= 0.08) {
+
+        reasons.add(
+            "Ukuran wajah cukup jelas"
+        )
+    }
+
+    val centerPositionScore =
+        averageCenterScore
+            .coerceIn(
+                0.0,
+                1.0
+            ) *
+        15.0
+
+    if (
+        averageCenterScore >= 0.75
+    ) {
+
+        reasons.add(
+            "Subjek dekat area tengah"
+        )
+    }
+
+    val openingHookScore =
+        openingVisualChange
+            .coerceIn(
+                0.0,
+                1.0
+            ) *
+        25.0
+
+    if (
+        openingVisualChange >= 0.35
+    ) {
+
+        reasons.add(
+            "Pembukaan memiliki perubahan visual"
+        )
+    }
+
+    val durationScore =
+        calculateDurationScore(
+            clipDurationMs
+        ) / 100.0 * 15.0
+
+    val durationSeconds =
+        clipDurationMs /
+        1000L
+
+    if (
+        durationSeconds in 20L..35L
+    ) {
+
+        reasons.add(
+            "Durasi cocok untuk video pendek"
+        )
+    }
+
+    if (
+        facePresence < 0.40
+    ) {
+
+        reasons.add(
+            "Wajah kurang konsisten"
+        )
+    }
+
+    if (
+        openingVisualChange < 0.10
+    ) {
+
+        reasons.add(
+            "Pembukaan cenderung statis"
+        )
+    }
+
+    val total =
+        (
+            facePresenceScore +
+            faceSizeScore +
+            centerPositionScore +
+            openingHookScore +
+            durationScore
+        )
+            .toInt()
+            .coerceIn(
+                0,
+                100
+            )
+
+    return Pair(
+        total,
+        reasons
+    )
+}
+
+fun calculateFrameBrightness(
+    bitmap: Bitmap
+): Double {
+
+    val sampleWidth =
+        minOf(
+            bitmap.width,
+            48
+        )
+
+    val sampleHeight =
+        minOf(
+            bitmap.height,
+            48
+        )
+
+    if (
+        sampleWidth <= 0 ||
+        sampleHeight <= 0
+    ) {
+
+        return 0.0
+    }
+
+    val scaledBitmap =
+        Bitmap.createScaledBitmap(
+            bitmap,
+            sampleWidth,
+            sampleHeight,
+            false
+        )
+
+    var brightnessTotal = 0.0
+    var pixelCount = 0
+
+    try {
+
+        for (
+            x in 0 until
+            scaledBitmap.width
+        ) {
+
+            for (
+                y in 0 until
+                scaledBitmap.height
+            ) {
+
+                val pixel =
+                    scaledBitmap.getPixel(
+                        x,
+                        y
+                    )
+
+                val brightness =
+                    (
+                        Color.red(pixel) *
+                        0.299 +
+
+                        Color.green(pixel) *
+                        0.587 +
+
+                        Color.blue(pixel) *
+                        0.114
+                    ) / 255.0
+
+                brightnessTotal +=
+                    brightness
+
+                pixelCount++
+            }
+        }
+
+    } finally {
+
+        if (
+            scaledBitmap !== bitmap
+        ) {
+
+            scaledBitmap.recycle()
+        }
+    }
+
+    return if (pixelCount > 0) {
+
+        brightnessTotal /
+        pixelCount.toDouble()
+
+    } else {
+
+        0.0
+    }
+}
+
 fun selectTopClips(
     candidates: List<ClipCandidate>,
     maximumClips: Int
@@ -798,9 +1301,13 @@ fun selectTopClips(
         mutableListOf<ClipCandidate>()
 
     val sortedCandidates =
-        candidates.sortedByDescending {
-            it.score
-        }
+        candidates.sortedWith(
+            compareByDescending<ClipCandidate> {
+                it.viralScore
+            }.thenByDescending {
+                it.visualScore
+            }
+        )
 
     for (
         candidate
@@ -825,12 +1332,36 @@ fun selectTopClips(
                 selected.size >=
                 maximumClips
             ) {
+
                 break
             }
         }
     }
 
     return selected
+}
+
+fun viralLabel(
+    score: Int
+): String {
+
+    return when {
+
+        score >= 85 ->
+            "Potensi visual sangat tinggi"
+
+        score >= 70 ->
+            "Potensi visual tinggi"
+
+        score >= 55 ->
+            "Potensi visual sedang"
+
+        score >= 40 ->
+            "Potensi visual rendah"
+
+        else ->
+            "Perlu perbaikan visual"
+    }
 }
 
 fun formatDuration(
@@ -841,10 +1372,12 @@ fun formatDuration(
         durationMs.coerceAtLeast(0L)
 
     val totalSeconds =
-        safeDuration / 1000L
+        safeDuration /
+        1000L
 
     val hours =
-        totalSeconds / 3600L
+        totalSeconds /
+        3600L
 
     val minutes =
         (
@@ -853,7 +1386,8 @@ fun formatDuration(
         ) / 60L
 
     val seconds =
-        totalSeconds % 60L
+        totalSeconds %
+        60L
 
     return if (hours > 0L) {
 
