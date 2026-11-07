@@ -1,16 +1,22 @@
 package com.youclipbot.android
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,13 +39,31 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.media3.common.Effect
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.Presentation
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.Effects
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.Transformer
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileInputStream
+import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -75,6 +99,12 @@ data class ClipCandidate(
     val reasons: List<String>
 )
 
+data class ExportedClip(
+    val fileName: String,
+    val uri: Uri,
+    val rank: Int
+)
+
 @Composable
 fun YouClipBotApp(
     context: Context
@@ -94,12 +124,28 @@ fun YouClipBotApp(
         mutableStateOf(false)
     }
 
+    var exporting by remember {
+        mutableStateOf(false)
+    }
+
+    var exportingRank by remember {
+        mutableStateOf<Int?>(null)
+    }
+
     var analysisStatus by remember {
+        mutableStateOf("")
+    }
+
+    var exportStatus by remember {
         mutableStateOf("")
     }
 
     var errorMessage by remember {
         mutableStateOf<String?>(null)
+    }
+
+    var exportedClip by remember {
+        mutableStateOf<ExportedClip?>(null)
     }
 
     val videoPicker =
@@ -110,10 +156,11 @@ fun YouClipBotApp(
             if (uri != null) {
                 try {
                     try {
-                        context.contentResolver.takePersistableUriPermission(
-                            uri,
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        )
+                        context.contentResolver
+                            .takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            )
                     } catch (_: SecurityException) {
                         // Beberapa file picker hanya memberi izin sementara.
                     }
@@ -124,7 +171,9 @@ fun YouClipBotApp(
                     )
 
                     clipCandidates = emptyList()
+                    exportedClip = null
                     analysisStatus = ""
+                    exportStatus = ""
                     errorMessage = null
 
                 } catch (exception: Exception) {
@@ -149,26 +198,25 @@ fun YouClipBotApp(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text(
-                text = "YouClipBot v2.3",
+                text = "YouClipBot v2.4",
                 style = MaterialTheme.typography.headlineMedium
             )
 
             Text(
                 text =
-                    "Pilih video panjang dan analisis maksimal lima " +
-                        "kandidat clip berdasarkan durasi, kualitas visual, " +
-                        "perubahan gambar, dan keberadaan wajah."
+                    "Pilih video panjang, analisis maksimal lima kandidat, " +
+                        "kemudian export kandidat menjadi video portrait 9:16."
             )
 
             Text(
                 text =
-                    "Estimated Viral Score adalah estimasi teknis awal. " +
-                        "Skor ini bukan jaminan bahwa video akan viral."
+                    "Estimated Viral Score adalah estimasi teknis berdasarkan " +
+                        "durasi, perubahan visual, dan keberadaan wajah."
             )
 
             Button(
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !analyzing,
+                enabled = !analyzing && !exporting,
                 onClick = {
                     videoPicker.launch(arrayOf("video/*"))
                 }
@@ -192,9 +240,7 @@ fun YouClipBotApp(
                     style = MaterialTheme.typography.titleMedium
                 )
 
-                Text(
-                    text = "Nama: ${video.name}"
-                )
+                Text(text = "Nama: ${video.name}")
 
                 Text(
                     text = "Ukuran: %.1f MB".format(video.sizeMb)
@@ -206,12 +252,14 @@ fun YouClipBotApp(
 
                 Button(
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !analyzing,
+                    enabled = !analyzing && !exporting,
                     onClick = {
                         scope.launch {
                             analyzing = true
                             errorMessage = null
                             clipCandidates = emptyList()
+                            exportedClip = null
+                            exportStatus = ""
 
                             analysisStatus =
                                 "Menyiapkan analisis video..."
@@ -238,14 +286,14 @@ fun YouClipBotApp(
                                     }
 
                             } catch (exception: Exception) {
+                                analysisStatus = ""
+
                                 errorMessage =
                                     "Analisis gagal: " +
                                         (
                                             exception.message
                                                 ?: "Kesalahan tidak diketahui"
                                             )
-
-                                analysisStatus = ""
 
                             } finally {
                                 analyzing = false
@@ -274,6 +322,42 @@ fun YouClipBotApp(
                 Text(text = analysisStatus)
             }
 
+            if (exporting) {
+                Card(
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text =
+                                if (exportingRank != null) {
+                                    "Membuat Clip #$exportingRank..."
+                                } else {
+                                    "Membuat clip..."
+                                },
+                            style = MaterialTheme.typography.titleMedium
+                        )
+
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        if (exportStatus.isNotBlank()) {
+                            Text(text = exportStatus)
+                        }
+
+                        Text(
+                            text =
+                                "Jangan menutup aplikasi selama proses export."
+                        )
+                    }
+                }
+            } else if (exportStatus.isNotBlank()) {
+                Text(text = exportStatus)
+            }
+
             errorMessage?.let { message ->
                 Card(
                     modifier = Modifier.fillMaxWidth()
@@ -296,6 +380,13 @@ fun YouClipBotApp(
                 }
             }
 
+            exportedClip?.let { result ->
+                ExportSuccessCard(
+                    context = context,
+                    exportedClip = result
+                )
+            }
+
             if (clipCandidates.isNotEmpty()) {
                 HorizontalDivider()
 
@@ -305,10 +396,67 @@ fun YouClipBotApp(
                 )
 
                 clipCandidates.forEachIndexed { index, candidate ->
+                    val rank = index + 1
 
                     ClipCandidateCard(
-                        rank = index + 1,
-                        candidate = candidate
+                        rank = rank,
+                        candidate = candidate,
+                        exporting = exporting,
+                        exportingThisCandidate =
+                            exporting && exportingRank == rank,
+                        onExport = {
+                            val sourceVideo = videoInfo
+
+                            if (sourceVideo == null) {
+                                errorMessage =
+                                    "Video sumber tidak tersedia."
+
+                                return@ClipCandidateCard
+                            }
+
+                            scope.launch {
+                                exporting = true
+                                exportingRank = rank
+                                exportedClip = null
+                                errorMessage = null
+
+                                exportStatus =
+                                    "Menyiapkan kandidat #$rank..."
+
+                                try {
+                                    exportStatus =
+                                        "Memotong video dan membuat format 9:16..."
+
+                                    val result =
+                                        exportClip9x16(
+                                            context = context,
+                                            video = sourceVideo,
+                                            candidate = candidate,
+                                            rank = rank
+                                        )
+
+                                    exportedClip = result
+
+                                    exportStatus =
+                                        "Clip berhasil disimpan ke " +
+                                            "Movies/YouClipBot."
+
+                                } catch (exception: Exception) {
+                                    exportStatus = ""
+
+                                    errorMessage =
+                                        "Export gagal: " +
+                                            (
+                                                exception.message
+                                                    ?: "Kesalahan tidak diketahui"
+                                                )
+
+                                } finally {
+                                    exporting = false
+                                    exportingRank = null
+                                }
+                            }
+                        }
                     )
                 }
             }
@@ -319,7 +467,10 @@ fun YouClipBotApp(
 @Composable
 fun ClipCandidateCard(
     rank: Int,
-    candidate: ClipCandidate
+    candidate: ClipCandidate,
+    exporting: Boolean,
+    exportingThisCandidate: Boolean,
+    onExport: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth()
@@ -348,13 +499,16 @@ fun ClipCandidateCard(
             )
 
             Text(
-                text = "Estimated Viral Score: ${candidate.viralScore}/100",
+                text =
+                    "Estimated Viral Score: " +
+                        "${candidate.viralScore}/100",
                 style = MaterialTheme.typography.titleMedium
             )
 
             LinearProgressIndicator(
                 progress = {
-                    candidate.viralScore.coerceIn(0, 100) / 100f
+                    candidate.viralScore
+                        .coerceIn(0, 100) / 100f
                 },
                 modifier = Modifier.fillMaxWidth()
             )
@@ -385,7 +539,82 @@ fun ClipCandidateCard(
                     Text(text = "• $reason")
                 }
             }
+
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !exporting,
+                onClick = onExport
+            ) {
+                Text(
+                    text =
+                        if (exportingThisCandidate) {
+                            "Sedang Membuat Clip..."
+                        } else {
+                            "Buat Clip 9:16"
+                        }
+                )
+            }
         }
+    }
+}
+
+@Composable
+fun ExportSuccessCard(
+    context: Context,
+    exportedClip: ExportedClip
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "Clip Berhasil Dibuat",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Text(
+                text = "Nama: ${exportedClip.fileName}"
+            )
+
+            Text(
+                text =
+                    "Lokasi: Movies/YouClipBot"
+            )
+
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    openExportedVideo(
+                        context = context,
+                        uri = exportedClip.uri
+                    )
+                }
+            ) {
+                Text(text = "Buka Video")
+            }
+        }
+    }
+}
+
+fun openExportedVideo(
+    context: Context,
+    uri: Uri
+) {
+    try {
+        val intent =
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "video/mp4")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+
+        context.startActivity(intent)
+
+    } catch (_: Exception) {
+        // File tetap tersimpan jika tidak ada aplikasi pemutar.
     }
 }
 
@@ -409,16 +638,26 @@ fun getVideoInfo(
 
         if (cursor.moveToFirst()) {
             val nameIndex =
-                cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                cursor.getColumnIndex(
+                    OpenableColumns.DISPLAY_NAME
+                )
 
             val sizeIndex =
-                cursor.getColumnIndex(OpenableColumns.SIZE)
+                cursor.getColumnIndex(
+                    OpenableColumns.SIZE
+                )
 
-            if (nameIndex >= 0 && !cursor.isNull(nameIndex)) {
+            if (
+                nameIndex >= 0 &&
+                !cursor.isNull(nameIndex)
+            ) {
                 fileName = cursor.getString(nameIndex)
             }
 
-            if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+            if (
+                sizeIndex >= 0 &&
+                !cursor.isNull(sizeIndex)
+            ) {
                 fileSizeBytes = cursor.getLong(sizeIndex)
             }
         }
@@ -444,13 +683,12 @@ fun getVideoInfo(
         )
     }
 
-    val sizeMb =
-        fileSizeBytes.toDouble() / (1024.0 * 1024.0)
-
     return VideoInfo(
         uri = uri,
         name = fileName,
-        sizeMb = sizeMb,
+        sizeMb =
+            fileSizeBytes.toDouble() /
+                (1024.0 * 1024.0),
         durationMs = durationMs
     )
 }
@@ -459,11 +697,14 @@ fun formatDuration(
     durationMs: Long
 ): String {
     val safeDuration = max(0L, durationMs)
-
     val totalSeconds = safeDuration / 1000L
+
     val hours = totalSeconds / 3600L
-    val minutes = (totalSeconds % 3600L) / 60L
-    val seconds = totalSeconds % 60L
+    val minutes =
+        (totalSeconds % 3600L) / 60L
+
+    val seconds =
+        totalSeconds % 60L
 
     return if (hours > 0L) {
         "%02d:%02d:%02d".format(
@@ -479,120 +720,471 @@ fun formatDuration(
     }
 }
 
+@OptIn(UnstableApi::class)
+suspend fun exportClip9x16(
+    context: Context,
+    video: VideoInfo,
+    candidate: ClipCandidate,
+    rank: Int
+): ExportedClip {
+    val safeStartMs =
+        candidate.startMs.coerceIn(
+            0L,
+            video.durationMs
+        )
+
+    val safeEndMs =
+        candidate.endMs.coerceIn(
+            safeStartMs + 1L,
+            video.durationMs
+        )
+
+    val cacheOutput =
+        File(
+            context.cacheDir,
+            "YouClipBot_export_${System.currentTimeMillis()}.mp4"
+        )
+
+    if (cacheOutput.exists()) {
+        cacheOutput.delete()
+    }
+
+    val clippingConfiguration =
+        MediaItem.ClippingConfiguration.Builder()
+            .setStartPositionMs(safeStartMs)
+            .setEndPositionMs(safeEndMs)
+            .build()
+
+    val mediaItem =
+        MediaItem.Builder()
+            .setUri(video.uri)
+            .setClippingConfiguration(
+                clippingConfiguration
+            )
+            .build()
+
+    val portraitPresentation: Effect =
+        Presentation.createForWidthAndHeight(
+            1080,
+            1920,
+            Presentation.LAYOUT_SCALE_TO_FIT_WITH_CROP
+        )
+
+    val effects =
+        Effects(
+            emptyList(),
+            listOf(portraitPresentation)
+        )
+
+    val editedMediaItem =
+        EditedMediaItem.Builder(mediaItem)
+            .setEffects(effects)
+            .build()
+
+    try {
+        runTransformerExport(
+            context = context,
+            editedMediaItem = editedMediaItem,
+            outputFile = cacheOutput
+        )
+
+        if (
+            !cacheOutput.exists() ||
+            cacheOutput.length() <= 0L
+        ) {
+            throw IOException(
+                "Media3 tidak menghasilkan file output."
+            )
+        }
+
+        val fileName =
+            "YouClipBot_Clip_%02d_%d.mp4".format(
+                rank,
+                System.currentTimeMillis()
+            )
+
+        val savedUri =
+            saveVideoToMovies(
+                context = context,
+                sourceFile = cacheOutput,
+                fileName = fileName
+            )
+
+        return ExportedClip(
+            fileName = fileName,
+            uri = savedUri,
+            rank = rank
+        )
+
+    } finally {
+        if (cacheOutput.exists()) {
+            cacheOutput.delete()
+        }
+    }
+}
+
+@OptIn(UnstableApi::class)
+suspend fun runTransformerExport(
+    context: Context,
+    editedMediaItem: EditedMediaItem,
+    outputFile: File
+) = suspendCancellableCoroutine<Unit> { continuation ->
+
+    var completed = false
+
+    val listener =
+        object : Transformer.Listener {
+
+            override fun onCompleted(
+                composition: Composition,
+                exportResult: ExportResult
+            ) {
+                if (!completed) {
+                    completed = true
+
+                    if (continuation.isActive) {
+                        continuation.resume(Unit)
+                    }
+                }
+            }
+
+            override fun onError(
+                composition: Composition,
+                exportResult: ExportResult,
+                exportException: ExportException
+            ) {
+                if (!completed) {
+                    completed = true
+
+                    if (continuation.isActive) {
+                        continuation.resumeWithException(
+                            exportException
+                        )
+                    }
+                }
+            }
+        }
+
+    val transformer =
+        Transformer.Builder(context)
+            .setVideoMimeType(
+                MimeTypes.VIDEO_H264
+            )
+            .setAudioMimeType(
+                MimeTypes.AUDIO_AAC
+            )
+            .addListener(listener)
+            .build()
+
+    continuation.invokeOnCancellation {
+        try {
+            transformer.cancel()
+        } catch (_: Exception) {
+            // Abaikan kesalahan saat membatalkan export.
+        }
+    }
+
+    try {
+        transformer.start(
+            editedMediaItem,
+            outputFile.absolutePath
+        )
+
+    } catch (exception: Exception) {
+        if (!completed) {
+            completed = true
+
+            if (continuation.isActive) {
+                continuation.resumeWithException(
+                    exception
+                )
+            }
+        }
+    }
+}
+
+suspend fun saveVideoToMovies(
+    context: Context,
+    sourceFile: File,
+    fileName: String
+): Uri = withContext(Dispatchers.IO) {
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        saveVideoWithMediaStore(
+            context = context,
+            sourceFile = sourceFile,
+            fileName = fileName
+        )
+    } else {
+        saveVideoForLegacyAndroid(
+            context = context,
+            sourceFile = sourceFile,
+            fileName = fileName
+        )
+    }
+}
+
+fun saveVideoWithMediaStore(
+    context: Context,
+    sourceFile: File,
+    fileName: String
+): Uri {
+    val resolver = context.contentResolver
+
+    val values =
+        ContentValues().apply {
+            put(
+                MediaStore.Video.Media.DISPLAY_NAME,
+                fileName
+            )
+
+            put(
+                MediaStore.Video.Media.MIME_TYPE,
+                "video/mp4"
+            )
+
+            put(
+                MediaStore.Video.Media.RELATIVE_PATH,
+                Environment.DIRECTORY_MOVIES +
+                    "/YouClipBot"
+            )
+
+            put(
+                MediaStore.Video.Media.IS_PENDING,
+                1
+            )
+        }
+
+    val outputUri =
+        resolver.insert(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            values
+        ) ?: throw IOException(
+            "Tidak dapat membuat file di MediaStore."
+        )
+
+    try {
+        resolver.openOutputStream(outputUri)?.use { output ->
+            FileInputStream(sourceFile).use { input ->
+                input.copyTo(output)
+            }
+        } ?: throw IOException(
+            "Tidak dapat membuka output MediaStore."
+        )
+
+        val completedValues =
+            ContentValues().apply {
+                put(
+                    MediaStore.Video.Media.IS_PENDING,
+                    0
+                )
+            }
+
+        resolver.update(
+            outputUri,
+            completedValues,
+            null,
+            null
+        )
+
+        return outputUri
+
+    } catch (exception: Exception) {
+        resolver.delete(
+            outputUri,
+            null,
+            null
+        )
+
+        throw exception
+    }
+}
+
+fun saveVideoForLegacyAndroid(
+    context: Context,
+    sourceFile: File,
+    fileName: String
+): Uri {
+    val baseDirectory =
+        context.getExternalFilesDir(
+            Environment.DIRECTORY_MOVIES
+        ) ?: context.filesDir
+
+    val outputDirectory =
+        File(
+            baseDirectory,
+            "YouClipBot"
+        )
+
+    if (
+        !outputDirectory.exists() &&
+        !outputDirectory.mkdirs()
+    ) {
+        throw IOException(
+            "Tidak dapat membuat folder YouClipBot."
+        )
+    }
+
+    val outputFile =
+        File(
+            outputDirectory,
+            fileName
+        )
+
+    sourceFile.inputStream().use { input ->
+        outputFile.outputStream().use { output ->
+            input.copyTo(output)
+        }
+    }
+
+    MediaScannerConnection.scanFile(
+        context,
+        arrayOf(outputFile.absolutePath),
+        arrayOf("video/mp4"),
+        null
+    )
+
+    return Uri.fromFile(outputFile)
+}
+
 suspend fun analyzeVideo(
     context: Context,
     video: VideoInfo,
     onProgress: (String) -> Unit
-): List<ClipCandidate> = withContext(Dispatchers.Default) {
+): List<ClipCandidate> =
+    withContext(Dispatchers.Default) {
 
-    if (video.durationMs <= 0L) {
-        throw IllegalArgumentException(
-            "Durasi video tidak valid."
-        )
-    }
-
-    onProgress("Membuka video...")
-
-    val retriever = MediaMetadataRetriever()
-
-    try {
-        retriever.setDataSource(context, video.uri)
-
-        val preferredClipDurationMs =
-            determineClipDuration(video.durationMs)
-
-        val candidateStarts =
-            buildCandidateStartTimes(
-                videoDurationMs = video.durationMs,
-                clipDurationMs = preferredClipDurationMs
+        if (video.durationMs <= 0L) {
+            throw IllegalArgumentException(
+                "Durasi video tidak valid."
             )
-
-        val detectorOptions =
-            FaceDetectorOptions.Builder()
-                .setPerformanceMode(
-                    FaceDetectorOptions.PERFORMANCE_MODE_FAST
-                )
-                .setLandmarkMode(
-                    FaceDetectorOptions.LANDMARK_MODE_NONE
-                )
-                .setClassificationMode(
-                    FaceDetectorOptions.CLASSIFICATION_MODE_NONE
-                )
-                .enableTracking()
-                .build()
-
-        val faceDetector =
-            FaceDetection.getClient(detectorOptions)
-
-        try {
-            val results = mutableListOf<ClipCandidate>()
-
-            candidateStarts.forEachIndexed { index, startMs ->
-
-                onProgress(
-                    "Menganalisis bagian ${index + 1} " +
-                        "dari ${candidateStarts.size}..."
-                )
-
-                val endMs =
-                    min(
-                        startMs + preferredClipDurationMs,
-                        video.durationMs
-                    )
-
-                val candidate =
-                    analyzeCandidateWindow(
-                        retriever = retriever,
-                        startMs = startMs,
-                        endMs = endMs,
-                        videoDurationMs = video.durationMs,
-                        faceDetector = faceDetector
-                    )
-
-                results.add(candidate)
-            }
-
-            onProgress("Mengurutkan kandidat terbaik...")
-
-            return@withContext results
-                .sortedWith(
-                    compareByDescending<ClipCandidate> {
-                        it.viralScore
-                    }.thenByDescending {
-                        it.visualScore
-                    }.thenByDescending {
-                        it.facePresence
-                    }
-                )
-                .distinctBy { candidate ->
-                    candidate.startMs / 5000L
-                }
-                .take(5)
-
-        } finally {
-            faceDetector.close()
         }
 
-    } finally {
-        retriever.release()
+        onProgress("Membuka video...")
+
+        val retriever =
+            MediaMetadataRetriever()
+
+        try {
+            retriever.setDataSource(
+                context,
+                video.uri
+            )
+
+            val clipDurationMs =
+                determineClipDuration(
+                    video.durationMs
+                )
+
+            val candidateStarts =
+                buildCandidateStartTimes(
+                    videoDurationMs =
+                        video.durationMs,
+                    clipDurationMs =
+                        clipDurationMs
+                )
+
+            val detectorOptions =
+                FaceDetectorOptions.Builder()
+                    .setPerformanceMode(
+                        FaceDetectorOptions
+                            .PERFORMANCE_MODE_FAST
+                    )
+                    .setLandmarkMode(
+                        FaceDetectorOptions
+                            .LANDMARK_MODE_NONE
+                    )
+                    .setClassificationMode(
+                        FaceDetectorOptions
+                            .CLASSIFICATION_MODE_NONE
+                    )
+                    .build()
+
+            val faceDetector =
+                FaceDetection.getClient(
+                    detectorOptions
+                )
+
+            try {
+                val results =
+                    mutableListOf<ClipCandidate>()
+
+                candidateStarts.forEachIndexed {
+                        index,
+                        startMs ->
+
+                    onProgress(
+                        "Menganalisis bagian " +
+                            "${index + 1} dari " +
+                            "${candidateStarts.size}..."
+                    )
+
+                    val endMs =
+                        min(
+                            startMs +
+                                clipDurationMs,
+                            video.durationMs
+                        )
+
+                    results.add(
+                        analyzeCandidateWindow(
+                            retriever = retriever,
+                            startMs = startMs,
+                            endMs = endMs,
+                            videoDurationMs =
+                                video.durationMs,
+                            faceDetector =
+                                faceDetector
+                        )
+                    )
+                }
+
+                onProgress(
+                    "Mengurutkan kandidat terbaik..."
+                )
+
+                return@withContext results
+                    .sortedWith(
+                        compareByDescending<ClipCandidate> {
+                            it.viralScore
+                        }.thenByDescending {
+                            it.visualScore
+                        }.thenByDescending {
+                            it.facePresence
+                        }
+                    )
+                    .distinctBy {
+                        it.startMs / 5000L
+                    }
+                    .take(5)
+
+            } finally {
+                faceDetector.close()
+            }
+
+        } finally {
+            retriever.release()
+        }
     }
-}
 
 fun determineClipDuration(
     videoDurationMs: Long
 ): Long {
     return when {
-        videoDurationMs >= 10L * 60L * 1000L ->
-            45_000L
+        videoDurationMs >=
+            10L * 60L * 1000L -> 45_000L
 
-        videoDurationMs >= 3L * 60L * 1000L ->
-            35_000L
+        videoDurationMs >=
+            3L * 60L * 1000L -> 35_000L
 
-        videoDurationMs >= 60_000L ->
-            30_000L
+        videoDurationMs >=
+            60_000L -> 30_000L
 
         else ->
-            min(videoDurationMs, 20_000L)
+            min(
+                videoDurationMs,
+                20_000L
+            )
     }
 }
 
@@ -605,22 +1197,29 @@ fun buildCandidateStartTimes(
     }
 
     val maximumStart =
-        max(0L, videoDurationMs - clipDurationMs)
+        max(
+            0L,
+            videoDurationMs -
+                clipDurationMs
+        )
 
     val desiredCandidateCount =
         when {
-            videoDurationMs >= 20L * 60L * 1000L -> 15
-            videoDurationMs >= 10L * 60L * 1000L -> 12
-            videoDurationMs >= 3L * 60L * 1000L -> 10
+            videoDurationMs >=
+                20L * 60L * 1000L -> 15
+
+            videoDurationMs >=
+                10L * 60L * 1000L -> 12
+
+            videoDurationMs >=
+                3L * 60L * 1000L -> 10
+
             else -> 6
         }
 
-    if (desiredCandidateCount <= 1) {
-        return listOf(0L)
-    }
-
     val interval =
-        maximumStart / (desiredCandidateCount - 1)
+        maximumStart /
+            (desiredCandidateCount - 1)
 
     return (0 until desiredCandidateCount)
         .map { index ->
@@ -637,53 +1236,65 @@ suspend fun analyzeCandidateWindow(
     startMs: Long,
     endMs: Long,
     videoDurationMs: Long,
-    faceDetector: com.google.mlkit.vision.face.FaceDetector
+    faceDetector: FaceDetector
 ): ClipCandidate {
     val sampleCount = 5
-
     val windowDuration =
         max(1L, endMs - startMs)
 
-    val frames = mutableListOf<Bitmap>()
+    val frames =
+        mutableListOf<Bitmap>()
+
     var detectedFaceFrames = 0
 
     try {
-        for (sampleIndex in 0 until sampleCount) {
+        for (
+            sampleIndex in
+            0 until sampleCount
+        ) {
             val relativePosition =
-                if (sampleCount == 1) {
-                    0L
-                } else {
-                    windowDuration * sampleIndex /
-                        (sampleCount - 1)
-                }
+                windowDuration *
+                    sampleIndex /
+                    (sampleCount - 1)
 
             val frameTimeMs =
                 min(
-                    startMs + relativePosition,
-                    max(0L, videoDurationMs - 1L)
+                    startMs +
+                        relativePosition,
+                    max(
+                        0L,
+                        videoDurationMs - 1L
+                    )
                 )
 
             val frame =
                 retriever.getFrameAtTime(
                     frameTimeMs * 1000L,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                    MediaMetadataRetriever
+                        .OPTION_CLOSEST_SYNC
                 )
 
             if (frame != null) {
                 frames.add(frame)
 
                 try {
-                    val inputImage =
-                        InputImage.fromBitmap(frame, 0)
+                    val image =
+                        InputImage.fromBitmap(
+                            frame,
+                            0
+                        )
 
                     val faces =
-                        faceDetector.process(inputImage).await()
+                        faceDetector
+                            .process(image)
+                            .await()
 
                     if (faces.isNotEmpty()) {
-                        detectedFaceFrames += 1
+                        detectedFaceFrames++
                     }
+
                 } catch (_: Exception) {
-                    // Analisis visual tetap dilanjutkan jika satu frame gagal.
+                    // Lanjutkan analisis frame lain.
                 }
             }
         }
@@ -691,8 +1302,10 @@ suspend fun analyzeCandidateWindow(
         val facePresence =
             if (frames.isNotEmpty()) {
                 (
-                    detectedFaceFrames.toDouble() /
-                        frames.size.toDouble() *
+                    detectedFaceFrames
+                        .toDouble() /
+                        frames.size
+                            .toDouble() *
                         100.0
                     ).toInt()
             } else {
@@ -700,8 +1313,8 @@ suspend fun analyzeCandidateWindow(
             }
 
         val brightnessValues =
-            frames.map { bitmap ->
-                calculateAverageBrightness(bitmap)
+            frames.map {
+                calculateAverageBrightness(it)
             }
 
         val averageBrightness =
@@ -718,41 +1331,45 @@ suspend fun analyzeCandidateWindow(
 
         val visualScore =
             calculateVisualScore(
-                averageBrightness = averageBrightness,
-                brightnessVariation = brightnessVariation,
-                facePresence = facePresence,
-                availableFrames = frames.size,
-                expectedFrames = sampleCount
+                averageBrightness =
+                    averageBrightness,
+                brightnessVariation =
+                    brightnessVariation,
+                facePresence =
+                    facePresence,
+                availableFrames =
+                    frames.size,
+                expectedFrames =
+                    sampleCount
             )
 
         val hookScore =
             calculateHookScore(
-                brightnessVariation = brightnessVariation,
-                facePresence = facePresence,
-                positionMs = startMs,
-                videoDurationMs = videoDurationMs
+                brightnessVariation =
+                    brightnessVariation,
+                facePresence =
+                    facePresence,
+                positionMs =
+                    startMs,
+                videoDurationMs =
+                    videoDurationMs
             )
 
         val durationScore =
             calculateDurationScore(
-                durationMs = windowDuration
+                windowDuration
             )
 
         val viralScore =
             calculateViralScore(
-                visualScore = visualScore,
-                hookScore = hookScore,
-                durationScore = durationScore,
-                facePresence = facePresence
-            )
-
-        val reasons =
-            buildCandidateReasons(
-                visualScore = visualScore,
-                hookScore = hookScore,
-                durationScore = durationScore,
-                facePresence = facePresence,
-                brightnessVariation = brightnessVariation
+                visualScore =
+                    visualScore,
+                hookScore =
+                    hookScore,
+                durationScore =
+                    durationScore,
+                facePresence =
+                    facePresence
             )
 
         return ClipCandidate(
@@ -763,13 +1380,25 @@ suspend fun analyzeCandidateWindow(
             durationScore = durationScore,
             viralScore = viralScore,
             facePresence = facePresence,
-            reasons = reasons
+            reasons =
+                buildCandidateReasons(
+                    visualScore =
+                        visualScore,
+                    hookScore =
+                        hookScore,
+                    durationScore =
+                        durationScore,
+                    facePresence =
+                        facePresence,
+                    brightnessVariation =
+                        brightnessVariation
+                )
         )
 
     } finally {
-        frames.forEach { bitmap ->
-            if (!bitmap.isRecycled) {
-                bitmap.recycle()
+        frames.forEach { frame ->
+            if (!frame.isRecycled) {
+                frame.recycle()
             }
         }
     }
@@ -778,7 +1407,10 @@ suspend fun analyzeCandidateWindow(
 fun calculateAverageBrightness(
     bitmap: Bitmap
 ): Double {
-    if (bitmap.width <= 0 || bitmap.height <= 0) {
+    if (
+        bitmap.width <= 0 ||
+        bitmap.height <= 0
+    ) {
         return 0.0
     }
 
@@ -788,40 +1420,51 @@ fun calculateAverageBrightness(
     var totalBrightness = 0.0
     var sampleTotal = 0
 
-    for (verticalIndex in 0 until verticalSamples) {
+    for (
+        verticalIndex in
+        0 until verticalSamples
+    ) {
         val y =
             min(
                 bitmap.height - 1,
-                verticalIndex * bitmap.height /
+                verticalIndex *
+                    bitmap.height /
                     verticalSamples
             )
 
-        for (horizontalIndex in 0 until horizontalSamples) {
+        for (
+            horizontalIndex in
+            0 until horizontalSamples
+        ) {
             val x =
                 min(
                     bitmap.width - 1,
-                    horizontalIndex * bitmap.width /
+                    horizontalIndex *
+                        bitmap.width /
                         horizontalSamples
                 )
 
-            val pixel = bitmap.getPixel(x, y)
+            val pixel =
+                bitmap.getPixel(x, y)
 
             val red =
-                android.graphics.Color.red(pixel)
+                android.graphics.Color
+                    .red(pixel)
 
             val green =
-                android.graphics.Color.green(pixel)
+                android.graphics.Color
+                    .green(pixel)
 
             val blue =
-                android.graphics.Color.blue(pixel)
+                android.graphics.Color
+                    .blue(pixel)
 
-            val brightness =
+            totalBrightness +=
                 0.299 * red +
                     0.587 * green +
                     0.114 * blue
 
-            totalBrightness += brightness
-            sampleTotal += 1
+            sampleTotal++
         }
     }
 
@@ -843,10 +1486,14 @@ fun calculateBrightnessVariation(
 
     for (index in 1 until values.size) {
         totalDifference +=
-            abs(values[index] - values[index - 1])
+            abs(
+                values[index] -
+                    values[index - 1]
+            )
     }
 
-    return totalDifference / (values.size - 1)
+    return totalDifference /
+        (values.size - 1)
 }
 
 fun calculateVisualScore(
@@ -858,9 +1505,14 @@ fun calculateVisualScore(
 ): Int {
     val brightnessScore =
         when {
-            averageBrightness in 70.0..190.0 -> 35
-            averageBrightness in 45.0..220.0 -> 25
+            averageBrightness in
+                70.0..190.0 -> 35
+
+            averageBrightness in
+                45.0..220.0 -> 25
+
             averageBrightness > 0.0 -> 15
+
             else -> 0
         }
 
@@ -879,7 +1531,9 @@ fun calculateVisualScore(
 
     val frameScore =
         if (expectedFrames > 0) {
-            availableFrames * 10 / expectedFrames
+            availableFrames *
+                10 /
+                expectedFrames
         } else {
             0
         }
@@ -933,14 +1587,14 @@ fun calculateHookScore(
 fun calculateDurationScore(
     durationMs: Long
 ): Int {
-    val durationSeconds =
+    val seconds =
         durationMs / 1000L
 
     return when {
-        durationSeconds in 25L..45L -> 100
-        durationSeconds in 20L..55L -> 90
-        durationSeconds in 15L..60L -> 80
-        durationSeconds in 10L..70L -> 65
+        seconds in 25L..45L -> 100
+        seconds in 20L..55L -> 90
+        seconds in 15L..60L -> 80
+        seconds in 10L..70L -> 65
         else -> 45
     }
 }
@@ -951,13 +1605,12 @@ fun calculateViralScore(
     durationScore: Int,
     facePresence: Int
 ): Int {
-    val weightedScore =
+    return (
         visualScore * 0.35 +
             hookScore * 0.35 +
             durationScore * 0.20 +
             facePresence * 0.10
-
-    return weightedScore
+        )
         .toInt()
         .coerceIn(0, 100)
 }
@@ -969,29 +1622,37 @@ fun buildCandidateReasons(
     facePresence: Int,
     brightnessVariation: Double
 ): List<String> {
-    val reasons = mutableListOf<String>()
+    val reasons =
+        mutableListOf<String>()
 
     if (visualScore >= 75) {
-        reasons.add("Kualitas visual terdeteksi kuat.")
+        reasons.add(
+            "Kualitas visual terdeteksi kuat."
+        )
     } else if (visualScore >= 55) {
-        reasons.add("Kualitas visual cukup baik.")
+        reasons.add(
+            "Kualitas visual cukup baik."
+        )
     }
 
     if (hookScore >= 75) {
         reasons.add(
-            "Perubahan visual berpotensi menjadi pembuka yang menarik."
+            "Perubahan visual berpotensi " +
+                "menjadi pembuka menarik."
         )
     }
 
     if (durationScore >= 90) {
         reasons.add(
-            "Durasi sesuai untuk TikTok, Reels, dan YouTube Shorts."
+            "Durasi sesuai untuk TikTok, " +
+                "Reels, dan YouTube Shorts."
         )
     }
 
     if (facePresence >= 60) {
         reasons.add(
-            "Wajah terlihat pada sebagian besar frame sampel."
+            "Wajah terlihat pada sebagian " +
+                "besar frame sampel."
         )
     } else if (facePresence > 0) {
         reasons.add(
@@ -1001,13 +1662,14 @@ fun buildCandidateReasons(
 
     if (brightnessVariation >= 20.0) {
         reasons.add(
-            "Terdapat perubahan visual yang cukup aktif."
+            "Terdapat perubahan visual yang aktif."
         )
     }
 
     if (reasons.isEmpty()) {
         reasons.add(
-            "Kandidat dipilih berdasarkan penyebaran posisi dalam video."
+            "Kandidat dipilih berdasarkan " +
+                "penyebaran posisi dalam video."
         )
     }
 
