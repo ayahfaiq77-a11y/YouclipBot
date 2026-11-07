@@ -31,7 +31,8 @@ android {
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
+    val composeBom =
+        platform("androidx.compose:compose-bom:2024.12.01")
 
     implementation(composeBom)
 
@@ -39,6 +40,9 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
+
+    implementation("com.google.mlkit:face-detection:16.1.7")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
