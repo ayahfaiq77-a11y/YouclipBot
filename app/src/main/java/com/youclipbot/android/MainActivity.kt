@@ -208,9 +208,9 @@ fun getVideoInfo(
     )
 
     val duration =
-        retriever.extractMetadata(
-    MediaMetadataRetriever.METADATA_KEY_DURATION
-)
+    retriever.extractMetadata(
+        MediaMetadataRetriever.METADATA_KEY_DURATION
+    )?.toLongOrNull() ?: 0L
 
     retriever.release()
 
